@@ -20,6 +20,7 @@ filegroup(
         ":BUILD.bazel",
         "//aspect/tools:JarFilter_deploy.jar",
         "//aspect/tools:PackageParser_deploy.jar",
+        "//aspect/tools:create_aar",
     ],
     visibility = ["//visibility:public"],
 )
@@ -38,6 +39,7 @@ filegroup(
         ":BUILD.bazel",
         "//aspect/tools:JarFilter_deploy.jar",
         "//aspect/tools:PackageParser_deploy.jar",
+        "//aspect/tools:create_aar",
     ],
     visibility = ["//visibility:public"],
 )
