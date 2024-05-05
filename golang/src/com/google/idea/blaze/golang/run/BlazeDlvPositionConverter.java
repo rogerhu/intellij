@@ -19,6 +19,7 @@ import com.goide.dlv.location.DlvPositionConverter;
 import com.goide.dlv.location.DlvPositionConverterFactory;
 import com.goide.sdk.GoSdkService;
 import com.google.common.collect.Maps;
+import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.File;
 import com.google.idea.blaze.base.io.VfsUtils;
 import com.google.idea.blaze.base.model.primitives.ExecutionRootPath;
 import com.google.idea.blaze.base.model.primitives.WorkspaceRoot;
@@ -27,9 +28,14 @@ import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.module.Module;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.VirtualFile;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
+import org.yaml.snakeyaml.Yaml;
 
 class BlazeDlvPositionConverter implements DlvPositionConverter {
   private static final Logger logger = Logger.getInstance(BlazeDlvPositionConverter.class);
@@ -39,6 +45,8 @@ class BlazeDlvPositionConverter implements DlvPositionConverter {
   private final ExecutionRootPathResolver resolver;
   private final Map<VirtualFile, String> localToRemote;
   private final Map<String, VirtualFile> normalizedToLocal;
+
+  private List<Map<String, String>> substitutePaths;
 
   private BlazeDlvPositionConverter(
       WorkspaceRoot workspaceRoot,
@@ -50,6 +58,16 @@ class BlazeDlvPositionConverter implements DlvPositionConverter {
     this.resolver = resolver;
     this.localToRemote = Maps.newHashMapWithExpectedSize(remotePaths.size());
     this.normalizedToLocal = Maps.newHashMapWithExpectedSize(remotePaths.size());
+
+    String filePath = "/Users/rogerhu/.dlv/config.yml";
+    Yaml yaml = new Yaml();
+    try {
+      Map<String, List<Map<String, String>>> yamlData = yaml.load(new FileInputStream(filePath));
+      substitutePaths = yamlData.get("substitute-path");
+    } catch (FileNotFoundException e) {
+      substitutePaths = null;
+    }
+
     for (String path : remotePaths) {
       String normalized = normalizePath(path);
       if (normalizedToLocal.containsKey(normalized)) {
@@ -98,8 +116,106 @@ class BlazeDlvPositionConverter implements DlvPositionConverter {
     return localFile;
   }
 
+  private boolean isAbsolute(String path) {
+    // Unix-like absolute path
+    if(path.startsWith("/")) {
+      return true;
+    }
+    return false; // todo - add windows support
+  }
+
+  private static boolean hasPathSeparatorSuffix(String path) {
+    return path.endsWith("/") || path.endsWith("\\");
+  }
+
+  private static boolean hasPathSeparatorPrefix(String path) {
+    return path.startsWith("/") || path.startsWith("\\");
+  }
+
+  public static char pickSeparator(String to) {
+    char sep = 0;
+    for (int i = 0; i < to.length(); i++) {
+      char ch = to.charAt(i);
+      if (ch == '/' || ch == '\\') {
+        if (sep == 0) {
+          sep = ch;
+        } else if (sep != ch) {
+          return 0; // Return null character to indicate mixed separators
+        }
+      }
+    }
+    return sep;
+  }
+
+  public static String joinPath(String to, String rest) {
+    char sep = pickSeparator(to);
+
+    switch (sep) {
+      case '/':
+        rest = rest.replace("\\", "/");
+        break;
+      case '\\':
+        rest = rest.replace("/", "\\");
+        break;
+      default:
+        sep = '/';
+        break;
+    }
+
+    boolean toEndsWithSlash = hasPathSeparatorSuffix(to);
+    boolean restStartsWithSlash = hasPathSeparatorPrefix(rest);
+
+    if (toEndsWithSlash && restStartsWithSlash) {
+      return to.substring(0, to.length() - 1) + rest;
+    } else if (toEndsWithSlash && !restStartsWithSlash) {
+      return to + rest;
+    } else if (!toEndsWithSlash && restStartsWithSlash) {
+      return to + rest;
+    } else {
+      return to + sep + rest;
+    }
+  }
+
+  // https://github.com/go-delve/delve/blob/bba7547156f271842da912f2c213285e8fab0169/pkg/locspec/locations.go#L554
+  private String substitutePath(String normalizedPath) {
+    if (substitutePaths != null) {
+      // See https://github.com/go-delve/delve/blob/master/Documentation/cli/substitutepath.md#how-are-path-substitution-rules-applied
+      boolean match = false;
+      for (Map<String, String> substitutePath : substitutePaths) {
+        String rest = "";
+
+        String from = substitutePath.get("from");
+        String to = substitutePath.get("to");
+        if (normalizedPath.equals(from)) {
+          return to;
+        }
+
+        // wildcard
+        if (from != null && from.isBlank()) {
+          match = !isAbsolute(normalizedPath);
+          rest = normalizedPath;
+        } else {
+          // todo - deal with case sensitivity for windows
+          match = normalizedPath.startsWith(from);
+
+          if (match) {
+            rest = normalizedPath.substring(from.length());
+            match = hasPathSeparatorSuffix(from) || hasPathSeparatorPrefix(rest);
+          }
+        }
+
+        if (match) {
+          //TODO - worry about wildcard blanks later
+          return joinPath(to, rest);
+        }
+      }
+    }
+    return normalizedPath;
+  }
+
   @Nullable
   private VirtualFile resolve(String normalizedPath) {
+    normalizedPath = substitutePath(normalizedPath);
     return VfsUtils.resolveVirtualFile(
         resolver.resolveExecutionRootPath(new ExecutionRootPath(normalizedPath)),
         /* refreshIfNeeded= */ false);
